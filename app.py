@@ -32,6 +32,11 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 load_dotenv()  # loads from .env into os.environ
 
+API_KEY = os.getenv("API_KEY")  # fetch the key
+if not API_KEY:
+    raise ValueError("API_KEY not found in environment variables!")
+
+genai.configure(api_key=API_KEY)
 
 # ---------------------------
 # Helpers
@@ -119,34 +124,32 @@ def tdee(bmr: float, activity_label: str) -> float:
     return bmr * factor
 
 
-def macro_targets(goal: str, weight_kg: float, calories: float) -> dict:
+def macro_targets(goal: str, weight_kg: float, calories: float, labs: dict | None = None) -> dict:
     """
-    Protein defaults:
-      - Fat loss: 1.8 g/kg
-      - Maintain: 1.6 g/kg
-      - Gain: 2.0 g/kg
-    Fat: 0.8 g/kg minimum (never below 20% calories). Carbs = remaining calories.
+    Compute macros based on goal, weight, and calories.
+    Optionally, adjust slightly based on lab deficiencies.
     """
+    # Base protein/fat as before
     goal_key = goal.lower()
-    if "lose" in goal_key:
-        p_gkg = 1.8
-    elif "gain" in goal_key:
-        p_gkg = 2.0
-    else:
-        p_gkg = 1.6
-
+    if "lose" in goal_key: p_gkg = 1.8
+    elif "gain" in goal_key: p_gkg = 2.0
+    else: p_gkg = 1.6
     protein_g = p_gkg * weight_kg
     fat_g_min = max(0.8 * weight_kg, 0.20 * calories / 9.0)
-
     calories_after_pf = calories - (protein_g * 4 + fat_g_min * 9)
     carbs_g = max(calories_after_pf / 4.0, 0)
 
-    return {
-        "protein_g": round(protein_g, 1),
-        "fat_g": round(fat_g_min, 1),
-        "carbs_g": round(carbs_g, 1),
-    }
+    # Optional lab-based tweaks
+    if labs:
+        # Example: if calcium low, slightly increase protein/fat from dairy sources
+        try:
+            if labs.get("Calcium") is not None and labs["Calcium"] < MICRO_TARGETS["Calcium"]["range"][0]:
+                protein_g += 5
+            if labs.get("Vitamin D (25-OH)") is not None and labs["Vitamin D (25-OH)"] < MICRO_TARGETS["Vitamin D (25-OH)"]["range"][0]:
+                fat_g_min += 2  # include fatty fish/egg yolk sources
+        except: pass
 
+    return {"protein_g": round(protein_g,1), "fat_g": round(fat_g_min,1), "carbs_g": round(carbs_g,1)}
 
 def apply_goal_calories(goal: str, tdee_val: float, custom_deficit_pct: float | None = None) -> float:
     if custom_deficit_pct is not None:
@@ -202,7 +205,40 @@ Format the answer neatly in markdown.
     except Exception as e:
         return f"❌ Gemini API error: {e}"
 
+def generate_diet_constraints_from_labs(labs: dict) -> str:
+    """Return a text block with dietary constraints based on lab values."""
+    tips = []
 
+    try:
+        # LDL Cholesterol – High
+        if labs.get("LDL") and float(labs["LDL"]) > MICRO_TARGETS["LDL"]["range"][1]:
+            tips.append("- Avoid high saturated fat foods (ghee, butter, fatty meats)")
+            tips.append("- Prefer olive oil, avocado, flaxseed")
+
+        # HDL – Low
+        if labs.get("HDL") and float(labs["HDL"]) < MICRO_TARGETS["HDL"]["range"][0]:
+            tips.append("- Include healthy fats like nuts, seeds, and fatty fish")
+
+        # Triglycerides – High
+        if labs.get("Triglycerides") and float(labs["Triglycerides"]) > MICRO_TARGETS["Triglycerides"]["range"][1]:
+            tips.append("- Avoid refined carbs and sugar")
+            tips.append("- Include omega-3 rich foods like flax, chia, fish")
+
+        # Total Cholesterol – High
+        if labs.get("Total Cholesterol") and float(labs["Total Cholesterol"]) > MICRO_TARGETS["Total Cholesterol"]["range"][1]:
+            tips.append("- Include high-fiber foods like oats, legumes, fruits")
+
+        # HbA1c – High (prediabetic/diabetic risk)
+        if labs.get("HbA1c") and float(labs["HbA1c"]) > MICRO_TARGETS["HbA1c"]["range"][1]:
+            tips.append("- Keep carbs low-GI (lentils, oats, quinoa)")
+            tips.append("- Balance each meal with protein + fiber + healthy fats")
+
+    except Exception as e:
+        print("Error parsing labs:", e)
+
+    if tips:
+        return "\n\nWhen suggesting meals, follow these dietary guidelines:\n" + "\n".join(tips)
+    return ""
 
 # ---------------------------
 # UI
@@ -260,42 +296,51 @@ calorie_diff = tdee_val - calories_goal  # positive = deficit
 timeline = estimate_timeline(weight_kg, target_weight_kg, calorie_diff)
 
 # Main layout
-summary_tab, macros_tab, labs_tab, plan_tab, charts_tab, meals_tab, trends_tab = st.tabs([
-    "Summary", "Macros", "Labs & Tips", "Weekly Plan", "Charts", "Smart Meals (API)", "Weight Trends"
+summary_tab, labs_tab, charts_tab, meals_tab, trends_tab = st.tabs([
+    "Summary", "Labs & Tips", "Charts", "Smart Meals (API)", "Weight Trends"
 ])
 
 with summary_tab:
     st.subheader("Your Summary")
+
+    # Columns for metrics
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("BMI", f"{bmi_val}")
-    c2.metric("Body Fat % (est)", f"{(np.nan if math.isnan(bodyfat) else round(bodyfat,1))}")
-    c3.metric("BMR", f"{bmr_val} kcal/day")
-    c4.metric("TDEE", f"{tdee_val} kcal/day")
-    c5.metric("Goal Calories", f"{calories_goal} kcal/day")
+
+    # Helper to format numbers nicely
+    def format_metric(val, unit=""):
+        return f"{val if val is not None else 'N/A'}{unit}"
+
+    # BMI
+    c1.metric(label="BMI", value=format_metric(round(bmi_val,1)))
+    
+    # Body Fat %
+    bodyfat_display = "N/A" if math.isnan(bodyfat) else f"{round(bodyfat,1)}%"
+    c2.metric(label="Body Fat % (est)", value=bodyfat_display)
+    
+    # BMR
+    c3.metric(label="BMR", value=format_metric(round(bmr_val), " kcal/day"), delta=None)
+    
+    # TDEE
+    c4.metric(label="TDEE", value=format_metric(round(tdee_val), " kcal/day"), delta=None)
+    
+    # Goal Calories
+    c5.metric(label="Goal Calories", value=format_metric(round(calories_goal), " kcal/day"),
+              delta=f"{'Deficit' if calorie_diff>0 else ('Surplus' if calorie_diff<0 else 'Neutral')}")
 
     st.markdown("---")
-    st.markdown(
-        f"**Calorie diff vs TDEE:** {int(calorie_diff)} kcal/day.  "+
-        ("(Deficit)" if calorie_diff>0 else ("(Surplus)" if calorie_diff<0 else "(Neutral)"))
-    )
 
+    # Calorie difference info box
+    calorie_status = "(Deficit)" if calorie_diff>0 else ("(Surplus)" if calorie_diff<0 else "(Neutral)")
+    st.info(f"Calorie diff vs TDEE: {int(calorie_diff)} kcal/day {calorie_status}")
+
+    # Timeline card
     if not (math.isinf(timeline["weeks"]) or math.isnan(timeline["weeks"])):
-        st.info(f"Estimated time to reach {target_weight_kg} kg: ~{timeline['weeks']} weeks (~{timeline['days']} days), using 7700 kcal/kg rule.")
+        st.success(
+            f"Estimated time to reach **{target_weight_kg} kg**: ~**{timeline['weeks']} weeks** (~{timeline['days']} days)\n"
+            "Calculated using 7700 kcal/kg rule."
+        )
     else:
         st.warning("Set a target weight and calorie deficit/surplus to see a timeline.")
-
-with macros_tab:
-    st.subheader("Daily Macro Targets")
-    st.write(
-        pd.DataFrame({
-            "Protein (g)": [macros["protein_g"]],
-            "Fat (g)": [macros["fat_g"]],
-            "Carbs (g)": [macros["carbs_g"]],
-            "Calories": [calories_goal],
-        })
-    )
-
-    st.caption("Protein ~1.6–2.0 g/kg depending on goal. Fat ≥0.8 g/kg (≥20% calories). Carbs = remaining calories.")
 
 with labs_tab:
     st.subheader("Lab Check & Food Tips")
@@ -328,94 +373,123 @@ with labs_tab:
     st.dataframe(df_report, use_container_width=True)
     st.caption("Ranges are generalized for healthy adults and may vary by lab & clinician guidance.")
 
-with plan_tab:
-    st.subheader("7-Day Macro Template")
-    # Simple 3-meal template per day based on daily macros (unchanged)
-    def build_template(macros: dict, calories: int) -> pd.DataFrame:
-        # Split into 3 meals + 1 snack (30/30/30/10% calories)
-        splits = {
-            "Breakfast": 0.30,
-            "Lunch": 0.30,
-            "Dinner": 0.30,
-            "Snack": 0.10,
-        }
-        rows = []
-        start_date = datetime.today().date()
-        for day in range(1, 8):
-            date_label = (start_date + timedelta(days=day-1)).strftime("%Y-%m-%d")
-            for meal, pct in splits.items():
-                rows.append({
-                    "Day": f"Day {day}",
-                    "Date": date_label,
-                    "Meal": meal,
-                    "Calories": round(calories * pct),
-                    "Protein (g)": round(macros["protein_g"] * pct, 1),
-                    "Fat (g)": round(macros["fat_g"] * pct, 1),
-                    "Carbs (g)": round(macros["carbs_g"] * pct, 1),
-                    "Example ideas": "Protein + veg + whole grain (e.g., paneer/chicken + roti/rice + salad)",
-                })
-        return pd.DataFrame(rows)
-
-    weekly = build_template(macros, calories_goal)
-    st.dataframe(weekly, use_container_width=True, height=400)
-
-    # Download CSV
-    csv = weekly.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        label="Download Weekly Macro Template (CSV)",
-        data=csv,
-        file_name="weekly_macro_template.csv",
-        mime="text/csv",
-    )
-
 with charts_tab:
     st.subheader("Charts")
-    # Macro bar chart
-    macro_df = pd.DataFrame({
-        "Macro": ["Protein", "Fat", "Carbs"],
-        "Grams": [macros["protein_g"], macros["fat_g"], macros["carbs_g"]],
-    })
-    fig1, ax1 = plt.subplots()
-    sns.barplot(data=macro_df, x="Macro", y="Grams", ax=ax1)
-    ax1.set_title("Daily Macro Targets (g)")
-    st.pyplot(fig1)
 
-    # Weight projection curve using kcal rule, smoothed by Savitzky–Golay
-    days = max(timeline.get("days", 0), 1)
-    x = np.arange(days + 1)
-    daily_delta_kg = (calorie_diff / 7700.0)  # positive deficit -> negative weight change per day when applied
-    proj = weight_kg - (x * daily_delta_kg)
-    # Smooth if long enough
-    if len(proj) >= 7:
-        window = 7 if (len(proj) % 2 == 1) else 7 + 1  # window must be odd
-        window = min(window, len(proj) - (1 - len(proj) % 2))
+    col1, col2 = st.columns(2)
+
+    # ==== Column 1: Macro Bar Chart ====
+    with col1:
+        required_keys = ["protein_g", "fat_g", "carbs_g"]
+        if all(k in macros for k in required_keys):
+            macro_df = pd.DataFrame({
+                "Macro": ["Protein", "Fat", "Carbs"],
+                "Grams": [macros["protein_g"], macros["fat_g"], macros["carbs_g"]],
+            })
+
+            fig1, ax1 = plt.subplots(figsize=(4, 3))
+            sns.barplot(data=macro_df, x="Macro", y="Grams", ax=ax1, palette="pastel")
+
+            # Add value labels above bars
+            for index, row in macro_df.iterrows():
+                ax1.text(index, row.Grams + 5, f"{row.Grams:.0f}", ha='center', fontsize=8)
+
+            # Set y-axis limit slightly above the tallest bar
+            max_grams = macro_df["Grams"].max()
+            ax1.set_ylim(0, max_grams + 20)  # add 20g padding above highest bar
+
+            ax1.set_title("Daily Macro Targets (g)", fontsize=10)
+            ax1.tick_params(labelsize=8)
+            st.pyplot(fig1)
+        else:
+            st.warning("Some macro data is missing.")
+
+    # ==== Column 2: Weight Projection Chart ====
+    with col2:
         try:
-            proj_smooth = savgol_filter(proj, window_length=max(5, window), polyorder=2)
-        except Exception:
-            proj_smooth = proj
-    else:
-        proj_smooth = proj
+            days = max(timeline.get("days", 0), 1)
+            x = np.arange(days + 1)
+            daily_delta_kg = calorie_diff / 7700.0  # Roughly 7700 kcal per 1 kg of fat
+            proj = weight_kg - (x * daily_delta_kg)
 
-    fig2, ax2 = plt.subplots()
-    ax2.plot(x, proj, label="Projection")
-    ax2.plot(x, proj_smooth, linestyle="--", label="Smoothed")
-    ax2.set_xlabel("Days")
-    ax2.set_ylabel("Weight (kg)")
-    ax2.set_title("Projected Weight Trajectory")
-    ax2.legend()
-    st.pyplot(fig2)
+            # Smooth projection using Savitzky-Golay filter
+            if len(proj) >= 5:
+                window = min(len(proj) if len(proj) % 2 == 1 else len(proj) - 1, 11)
+                try:
+                    proj_smooth = savgol_filter(proj, window_length=window, polyorder=2)
+                except ValueError:
+                    proj_smooth = proj
+            else:
+                proj_smooth = proj
 
+            fig2, ax2 = plt.subplots(figsize=(4, 3))
+            ax2.plot(x, proj, label="Projection", linewidth=1.5)
+            ax2.plot(x, proj_smooth, linestyle="--", label="Smoothed", linewidth=1, color="orange")
+
+            ax2.set_xlabel("Days", fontsize=8)
+            ax2.set_ylabel("Weight (kg)", fontsize=8)
+            ax2.set_title("Weight Projection", fontsize=10)
+            ax2.tick_params(labelsize=8)
+            ax2.set_ylim(proj.min() - 1, proj.max() + 1)
+            ax2.legend(fontsize=8)
+
+            st.pyplot(fig2)
+        except Exception as e:
+            st.error(f"Error generating weight projection chart: {e}")
+            
 with meals_tab:
-    st.subheader("💡 Smart Meal Generator (Gemini API)")
+    st.subheader("🍽️ Full-Day Meal Plan Generator")
+
+    col_p, col_f, col_c = st.columns(3)
+    with col_p:
+        protein_target = st.number_input("Daily Protein (g)", value=126)
+    with col_f:
+        fat_target = st.number_input("Daily Fat (g)", value=56)
+    with col_c:
+        carb_target = st.number_input("Daily Carbs (g)", value=191)
+
+    if st.button("Generate Full-Day Meal Plan"):
+        with st.spinner("Generating meal plan..."):
+            lab_constraints = generate_diet_constraints_from_labs(labs)
+
+            prompt = (
+                        "You're a professional Indian chef and nutritionist.\n\n"
+                        "Generate 3 different full-day Indian meal plans. Each plan should include:\n"
+                        "- Breakfast\n"
+                        "- Lunch\n"
+                        "- Snack\n"
+                        "- Dinner\n\n"
+                        f"Each day should aim to meet the following total daily macros:\n"
+                        f"- Protein: {protein_target}g\n"
+                        f"- Fat: {fat_target}g\n"
+                        f"- Carbs: {carb_target}g\n\n"
+                        "For every meal:\n"
+                        "- Give a unique dish name\n"
+                        "- List ingredients (with metric quantities)\n"
+                        "- Provide clear cooking instructions\n"
+                        "- Estimate nutrition per meal (calories, protein g, carbs g, fats g)\n\n"
+                        "Separate the plans clearly as Day 1, Day 2, and Day 3.\n"
+                        "Make sure there’s variety across days.\n"
+                        f"\n\n{lab_constraints}"
+                    )
+
+
+            full_day_plan = generate_recipe_with_gemini(prompt)
+            st.session_state["full_day_plan"] = full_day_plan
+            st.markdown(st.session_state["full_day_plan"], unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.subheader("💡 Smart Meal Generator")
     st.caption(
         "Ask anything like: 'high protein dosa for breakfast', "
         "'meal with oats and paneer', etc."
     )
 
-    # User input for recipe generation
+    # Recipe input
     recipe_query = st.text_input(
         "Describe your meal idea or ask for a recipe suggestion",
-        value="high protein dosa for breakfast"
+        value=st.session_state.get("last_recipe_query", "high protein dosa for breakfast"),
+        key="recipe_input"
     )
 
     if st.button("Generate Recipe"):
@@ -432,12 +506,19 @@ with meals_tab:
                     "- Approximate nutrition breakdown per serving (calories, protein g, carbs g, fats g)\n"
                 )
                 recipe_text = generate_recipe_with_gemini(prompt)
-                st.markdown(recipe_text)
+
+                # Save in session state
+                st.session_state["generated_recipe"] = recipe_text
+                st.session_state["last_recipe_query"] = recipe_query
         else:
             st.warning("Please enter a description to generate a recipe.")
 
+    # Show saved recipe if exists
+    if "generated_recipe" in st.session_state:
+        st.markdown(st.session_state["generated_recipe"])
+
     st.markdown("---")
-    st.subheader("📊 Nutrition Breakdown (Gemini API)")
+    st.subheader("📊 Nutrition Breakdown")
     nutrition_input = st.text_area(
         "Enter a meal description (e.g., ‘2 roti and eggs’) for nutrition analysis",
         height=100
