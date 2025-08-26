@@ -594,6 +594,6 @@ st.markdown("""
 - Weight timeline uses the 7700 kcal/kg heuristic; actual progress varies.
 - Charts built with matplotlib + seaborn; trend fit with scikit-learn LinearRegression.
 - Smoothing with scipy.savgol_filter. Date parsing/handling via python-dateutil.
-- Recipe ideas use the Edamam API if `EDAMAM_APP_ID` and `EDAMAM_APP_KEY` are set; otherwise a local fallback is shown.
+- Recipe ideas and nutrition analysis are powered by Gemini (Google Generative AI). If the Gemini API key isn’t set, the app shows a simple local fallback.
 - This tool is informational only and not a substitute for professional medical advice.
 """)
