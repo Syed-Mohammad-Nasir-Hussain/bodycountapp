@@ -8,7 +8,7 @@
 # - Projects weight-loss timeline from chosen calorie deficit
 # - Exports a 7-day meal macro template
 # - NEW: Charts (matplotlib + seaborn), trend forecasting (scikit-learn),
-#        API-based meal ideas via requests (Edamam/USDA), date handling (dateutil),
+#        API-based meal ideas via requests (GEN AI MODEL), date handling (dateutil),
 #        smoothing with scipy
 # -------------------------------------------------------------
 
@@ -594,6 +594,6 @@ st.markdown("""
 - Weight timeline uses the 7700 kcal/kg heuristic; actual progress varies.
 - Charts built with matplotlib + seaborn; trend fit with scikit-learn LinearRegression.
 - Smoothing with scipy.savgol_filter. Date parsing/handling via python-dateutil.
-- Recipe ideas and nutrition analysis are powered by Gemini (Google Generative AI). If the Gemini API key isn’t set, the app shows a simple local fallback.
+- Recipe ideas and nutrition analysis are powered by GEN AI MODEL.
 - This tool is informational only and not a substitute for professional medical advice.
 """)
