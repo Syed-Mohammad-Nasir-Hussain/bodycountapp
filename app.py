@@ -442,11 +442,20 @@ with meals_tab:
 
     col_p, col_f, col_c = st.columns(3)
     with col_p:
-        protein_target = st.number_input("Daily Protein (g)", value=126)
+        protein_target = st.number_input(
+            "Daily Protein (g)", 
+            value=int(macros.get("protein_g", 120))  # fallback in case macros missing
+        )
     with col_f:
-        fat_target = st.number_input("Daily Fat (g)", value=56)
+        fat_target = st.number_input(
+            "Daily Fat (g)", 
+            value=int(macros.get("fat_g", 50))
+        )
     with col_c:
-        carb_target = st.number_input("Daily Carbs (g)", value=191)
+        carb_target = st.number_input(
+            "Daily Carbs (g)", 
+            value=int(macros.get("carbs_g", 180))
+        )
 
     if st.button("Generate Full-Day Meal Plan"):
         with st.spinner("Generating meal plan..."):
